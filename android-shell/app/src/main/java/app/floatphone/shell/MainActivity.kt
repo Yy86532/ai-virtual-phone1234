@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
@@ -25,7 +26,10 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 /**
  * Float 小手机安卓壳：全屏 WebView 直接加载线上站点。
@@ -85,13 +89,25 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, true)
+        applyEdgeToEdge()
         // 音量键默认调媒体流：WebView 里的语音条/TTS 都走媒体流播放，
         // 不设的话短音频没在播时按键调的是铃声，用户感觉"音量键无效、声音巨大"
         volumeControlStream = AudioManager.STREAM_MUSIC
 
         webView = WebView(this)
         setContentView(webView)
+
+        // edge-to-edge 后系统不再替 WebView 避让输入法（原 adjustResize 依赖
+        // WindowInsets 下发给内容视图，而不是缩放窗口）。把 IME 高度作为 WebView
+        // 的底部内边距，等价于旧行为：内容区在键盘上方结束，visualViewport 同步
+        // 缩小，desktop-shell 里基于 visualViewport 的键盘抬升量自然为 0，不会叠加。
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
+            val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            if (view.paddingBottom != imeBottom) {
+                view.setPadding(view.paddingLeft, view.paddingTop, view.paddingRight, imeBottom)
+            }
+            insets
+        }
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -182,6 +198,43 @@ class MainActivity : AppCompatActivity() {
         // 冷启动带深链（如来电接听）直接加载目标；否则加载首页
         webView.loadUrl(consumeOpenUrl(intent) ?: SITE_URL)
         ensurePushService()
+    }
+
+    /**
+     * 窗口铺满整块屏幕，系统栏改为"盖在网页上"：
+     * - 旧写法 setDecorFitsSystemWindows(true) 会把 WebView 压在状态栏下方，
+     *   状态栏区域露出 Activity 的白色窗口底色（顶部白边）；
+     *   导航栏的对比度遮罩在底部形成一条灰黑色带（底部黑边）。
+     * - 现在网页/壁纸画到屏幕四边：状态栏透明保留（真实时间/信号浮在壁纸上），
+     *   导航栏透明并隐藏，只保留手势区域；从底部上滑仍可临时呼出系统栏。
+     */
+    private fun applyEdgeToEdge() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            // 刘海/挖孔区域也允许壁纸铺过去，否则顶部仍会被切出一条边
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // 透明系统栏会被系统叠一层对比度遮罩（浅色壁纸下呈灰白/灰黑边），关掉
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.navigationBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    /** 从系统弹窗/权限框回来后导航栏可能被系统重新显示，重新收起 */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            WindowCompat.getInsetsController(window, window.decorView)
+                .hide(WindowInsetsCompat.Type.navigationBars())
+        }
     }
 
     /** singleTask：App 已在运行时（如全屏来电页接听）通过 onNewIntent 送达深链 */
